@@ -2,565 +2,389 @@
 
 namespace Illuminate\Filesystem;
 
-use ErrorException;
-use FilesystemIterator;
-use Symfony\Component\Finder\Finder;
-use Illuminate\Support\Traits\Macroable;
-use Illuminate\Contracts\Filesystem\FileNotFoundException;
+use Closure;
+use Aws\S3\S3Client;
+use OpenCloud\Rackspace;
+use Illuminate\Support\Arr;
+use InvalidArgumentException;
+use League\Flysystem\AdapterInterface;
+use League\Flysystem\Sftp\SftpAdapter;
+use League\Flysystem\FilesystemInterface;
+use League\Flysystem\Cached\CachedAdapter;
+use League\Flysystem\Filesystem as Flysystem;
+use League\Flysystem\Adapter\Ftp as FtpAdapter;
+use League\Flysystem\Rackspace\RackspaceAdapter;
+use League\Flysystem\Adapter\Local as LocalAdapter;
+use League\Flysystem\AwsS3v3\AwsS3Adapter as S3Adapter;
+use League\Flysystem\Cached\Storage\Memory as MemoryStore;
+use Illuminate\Contracts\Filesystem\Factory as FactoryContract;
+use Illuminate\Support\Manager as SupportManager;
 
-class Filesystem
+/**
+ * @mixin \Illuminate\Contracts\Filesystem\Filesystem
+ */
+class FilesystemManager extends SupportManager implements FactoryContract
 {
-    use Macroable;
-
     /**
-     * Determine if a file or directory exists.
+     * The application instance.
      *
-     * @param  string  $path
-     * @return bool
+     * @var \Illuminate\Contracts\Foundation\Application
      */
-    public function exists($path)
-    {
-        return file_exists($path);
-    }
+    protected $app;
 
     /**
-     * Get the contents of a file.
+     * The array of resolved filesystem drivers.
      *
-     * @param  string  $path
-     * @param  bool  $lock
-     * @return string
-     *
-     * @throws \Illuminate\Contracts\Filesystem\FileNotFoundException
+     * @var array
      */
-    public function get($path, $lock = false)
-    {
-        if ($this->isFile($path)) {
-            return $lock ? $this->sharedGet($path) : file_get_contents($path);
-        }
-
-        throw new FileNotFoundException("File does not exist at path {$path}");
-    }
+    protected $disks = [];
 
     /**
-     * Get contents of a file with shared access.
+     * The registered custom driver creators.
      *
-     * @param  string  $path
-     * @return string
+     * @var array
      */
-    public function sharedGet($path)
-    {
-        $contents = '';
-
-        $handle = fopen($path, 'rb');
-
-        if ($handle) {
-            try {
-                if (flock($handle, LOCK_SH)) {
-                    clearstatcache(true, $path);
-
-                    $contents = fread($handle, $this->size($path) ?: 1);
-
-                    flock($handle, LOCK_UN);
-                }
-            } finally {
-                fclose($handle);
-            }
-        }
-
-        return $contents;
-    }
+    protected $customCreators = [];
 
     /**
-     * Get the returned value of a file.
+     * Create a new filesystem manager instance.
      *
-     * @param  string  $path
-     * @return mixed
-     *
-     * @throws \Illuminate\Contracts\Filesystem\FileNotFoundException
-     */
-    public function getRequire($path)
-    {
-        if ($this->isFile($path)) {
-            return require $path;
-        }
-
-        throw new FileNotFoundException("File does not exist at path {$path}");
-    }
-
-    /**
-     * Require the given file once.
-     *
-     * @param  string  $file
-     * @return mixed
-     */
-    public function requireOnce($file)
-    {
-        require_once $file;
-    }
-
-    /**
-     * Get the MD5 hash of the file at the given path.
-     *
-     * @param  string  $path
-     * @return string
-     */
-    public function hash($path)
-    {
-        return md5_file($path);
-    }
-
-    /**
-     * Write the contents of a file.
-     *
-     * @param  string  $path
-     * @param  string  $contents
-     * @param  bool  $lock
-     * @return int
-     */
-    public function put($path, $contents, $lock = false)
-    {
-        return file_put_contents($path, $contents, $lock ? LOCK_EX : 0);
-    }
-
-    /**
-     * Prepend to a file.
-     *
-     * @param  string  $path
-     * @param  string  $data
-     * @return int
-     */
-    public function prepend($path, $data)
-    {
-        if ($this->exists($path)) {
-            return $this->put($path, $data.$this->get($path));
-        }
-
-        return $this->put($path, $data);
-    }
-
-    /**
-     * Append to a file.
-     *
-     * @param  string  $path
-     * @param  string  $data
-     * @return int
-     */
-    public function append($path, $data)
-    {
-        return file_put_contents($path, $data, FILE_APPEND);
-    }
-
-    /**
-     * Get or set UNIX mode of a file or directory.
-     *
-     * @param  string  $path
-     * @param  int  $mode
-     * @return mixed
-     */
-    public function chmod($path, $mode = null)
-    {
-        if ($mode) {
-            return chmod($path, $mode);
-        }
-
-        return substr(sprintf('%o', fileperms($path)), -4);
-    }
-
-    /**
-     * Delete the file at a given path.
-     *
-     * @param  string|array  $paths
-     * @return bool
-     */
-    public function delete($paths)
-    {
-        $paths = is_array($paths) ? $paths : func_get_args();
-
-        $success = true;
-
-        foreach ($paths as $path) {
-            try {
-                if (! @unlink($path)) {
-                    $success = false;
-                }
-            } catch (ErrorException $e) {
-                $success = false;
-            }
-        }
-
-        return $success;
-    }
-
-    /**
-     * Move a file to a new location.
-     *
-     * @param  string  $path
-     * @param  string  $target
-     * @return bool
-     */
-    public function move($path, $target)
-    {
-        return rename($path, $target);
-    }
-
-    /**
-     * Copy a file to a new location.
-     *
-     * @param  string  $path
-     * @param  string  $target
-     * @return bool
-     */
-    public function copy($path, $target)
-    {
-        return copy($path, $target);
-    }
-
-    /**
-     * Create a hard link to the target file or directory.
-     *
-     * @param  string  $target
-     * @param  string  $link
+     * @param  \Illuminate\Contracts\Foundation\Application  $app
      * @return void
      */
-    public function link($target, $link)
+    public function __construct($app)
     {
-        if (! windows_os()) {
-            return symlink($target, $link);
+        $this->app = $app;
+    }
+
+    /**
+     * Get a filesystem instance.
+     *
+     * @param  string  $name
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
+     */
+    public function drive($name = null)
+    {
+        return $this->disk($name);
+    }
+
+    /**
+     * Get a filesystem instance.
+     *
+     * @param  string  $name
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
+     */
+    public function disk($name = null)
+    {
+        $name = $name ?: $this->getDefaultDriver();
+
+        return $this->disks[$name] = $this->get($name);
+    }
+
+    /**
+     * Get a default cloud filesystem instance.
+     *
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
+     */
+    public function cloud()
+    {
+        $name = $this->getDefaultCloudDriver();
+
+        return $this->disks[$name] = $this->get($name);
+    }
+
+    /**
+     * Attempt to get the disk from the local cache.
+     *
+     * @param  string  $name
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
+     */
+    protected function get($name)
+    {
+        return $this->disks[$name] ?? $this->resolve($name);
+    }
+
+    /**
+     * Resolve the given disk.
+     *
+     * @param  string  $name
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
+     *
+     * @throws \InvalidArgumentException
+     */
+    protected function resolve($name)
+    {
+        $config = $this->getConfig($name);
+
+        if (isset($this->customCreators[$config['driver']])) {
+            return $this->callCustomCreator($config);
         }
 
-        $mode = $this->isDirectory($target) ? 'J' : 'H';
+        $driverMethod = 'create'.ucfirst($config['driver']).'Driver';
 
-        exec("mklink /{$mode} \"{$link}\" \"{$target}\"");
+        if (method_exists($this, $driverMethod)) {
+            return $this->{$driverMethod}($config);
+        } else {
+            throw new InvalidArgumentException("Driver [{$config['driver']}] is not supported.");
+        }
     }
 
     /**
-     * Extract the file name from a file path.
+     * Call a custom driver creator.
      *
-     * @param  string  $path
-     * @return string
+     * @param  mixed  $config
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
      */
-    public function name($path)
+    protected function callCustomCreator($config)
     {
-        return pathinfo($path, PATHINFO_FILENAME);
+        $driver = $config;
+        if(is_array($config)){
+            $driver = $config['driver'];
+        }
+
+        $driver = $this->customCreators[$driver]($this->app, $config);
+
+        if ($driver instanceof FilesystemInterface) {
+            return $this->adapt($driver);
+        }
+
+        return $driver;
     }
 
     /**
-     * Extract the trailing name component from a file path.
+     * Create an instance of the local driver.
      *
-     * @param  string  $path
-     * @return string
+     * @param  array  $config
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
      */
-    public function basename($path)
+    public function createLocalDriver(array $config)
     {
-        return pathinfo($path, PATHINFO_BASENAME);
+        $permissions = $config['permissions'] ?? [];
+
+        $links = ($config['links'] ?? null) === 'skip'
+            ? LocalAdapter::SKIP_LINKS
+            : LocalAdapter::DISALLOW_LINKS;
+
+        return $this->adapt($this->createFlysystem(new LocalAdapter(
+            $config['root'], LOCK_EX, $links, $permissions
+        ), $config));
     }
 
     /**
-     * Extract the parent directory from a file path.
+     * Create an instance of the ftp driver.
      *
-     * @param  string  $path
-     * @return string
+     * @param  array  $config
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
      */
-    public function dirname($path)
+    public function createFtpDriver(array $config)
     {
-        return pathinfo($path, PATHINFO_DIRNAME);
+        return $this->adapt($this->createFlysystem(
+            new FtpAdapter($config), $config
+        ));
     }
 
     /**
-     * Extract the file extension from a file path.
+     * Create an instance of the sftp driver.
      *
-     * @param  string  $path
-     * @return string
+     * @param  array  $config
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
      */
-    public function extension($path)
+    public function createSftpDriver(array $config)
     {
-        return pathinfo($path, PATHINFO_EXTENSION);
+        return $this->adapt($this->createFlysystem(
+            new SftpAdapter($config), $config
+        ));
     }
 
     /**
-     * Get the file type of a given file.
+     * Create an instance of the Amazon S3 driver.
      *
-     * @param  string  $path
-     * @return string
+     * @param  array  $config
+     * @return \Illuminate\Contracts\Filesystem\Cloud
      */
-    public function type($path)
+    public function createS3Driver(array $config)
     {
-        return filetype($path);
+        $s3Config = $this->formatS3Config($config);
+
+        $root = $s3Config['root'] ?? null;
+
+        $options = $config['options'] ?? [];
+
+        return $this->adapt($this->createFlysystem(
+            new S3Adapter(new S3Client($s3Config), $s3Config['bucket'], $root, $options), $config
+        ));
     }
 
     /**
-     * Get the mime-type of a given file.
+     * Format the given S3 configuration with the default options.
      *
-     * @param  string  $path
-     * @return string|false
-     */
-    public function mimeType($path)
-    {
-        return finfo_file(finfo_open(FILEINFO_MIME_TYPE), $path);
-    }
-
-    /**
-     * Get the file size of a given file.
-     *
-     * @param  string  $path
-     * @return int
-     */
-    public function size($path)
-    {
-        return filesize($path);
-    }
-
-    /**
-     * Get the file's last modification time.
-     *
-     * @param  string  $path
-     * @return int
-     */
-    public function lastModified($path)
-    {
-        return filemtime($path);
-    }
-
-    /**
-     * Determine if the given path is a directory.
-     *
-     * @param  string  $directory
-     * @return bool
-     */
-    public function isDirectory($directory)
-    {
-        return is_dir($directory);
-    }
-
-    /**
-     * Determine if the given path is readable.
-     *
-     * @param  string  $path
-     * @return bool
-     */
-    public function isReadable($path)
-    {
-        return is_readable($path);
-    }
-
-    /**
-     * Determine if the given path is writable.
-     *
-     * @param  string  $path
-     * @return bool
-     */
-    public function isWritable($path)
-    {
-        return is_writable($path);
-    }
-
-    /**
-     * Determine if the given path is a file.
-     *
-     * @param  string  $file
-     * @return bool
-     */
-    public function isFile($file)
-    {
-        return is_file($file);
-    }
-
-    /**
-     * Find path names matching a given pattern.
-     *
-     * @param  string  $pattern
-     * @param  int     $flags
+     * @param  array  $config
      * @return array
      */
-    public function glob($pattern, $flags = 0)
+    protected function formatS3Config(array $config)
     {
-        return glob($pattern, $flags);
+        $config += ['version' => 'latest'];
+
+        if ($config['key'] && $config['secret']) {
+            $config['credentials'] = Arr::only($config, ['key', 'secret']);
+        }
+
+        return $config;
     }
 
     /**
-     * Get an array of all files in a directory.
+     * Create an instance of the Rackspace driver.
      *
-     * @param  string  $directory
-     * @param  bool  $hidden
-     * @return \Symfony\Component\Finder\SplFileInfo[]
+     * @param  array  $config
+     * @return \Illuminate\Contracts\Filesystem\Cloud
      */
-    public function files($directory, $hidden = false)
+    public function createRackspaceDriver(array $config)
     {
-        return iterator_to_array(
-            Finder::create()->files()->ignoreDotFiles(! $hidden)->in($directory)->depth(0)->sortByName(),
-            false
+        $client = new Rackspace($config['endpoint'], [
+            'username' => $config['username'], 'apiKey' => $config['key'],
+        ]);
+
+        $root = $config['root'] ?? null;
+
+        return $this->adapt($this->createFlysystem(
+            new RackspaceAdapter($this->getRackspaceContainer($client, $config), $root), $config
+        ));
+    }
+
+    /**
+     * Get the Rackspace Cloud Files container.
+     *
+     * @param  \OpenCloud\Rackspace  $client
+     * @param  array  $config
+     * @return \OpenCloud\ObjectStore\Resource\Container
+     */
+    protected function getRackspaceContainer(Rackspace $client, array $config)
+    {
+        $urlType = $config['url_type'] ?? null;
+
+        $store = $client->objectStoreService('cloudFiles', $config['region'], $urlType);
+
+        return $store->getContainer($config['container']);
+    }
+
+    /**
+     * Create a Flysystem instance with the given adapter.
+     *
+     * @param  \League\Flysystem\AdapterInterface  $adapter
+     * @param  array  $config
+     * @return \League\Flysystem\FilesystemInterface
+     */
+    protected function createFlysystem(AdapterInterface $adapter, array $config)
+    {
+        $cache = Arr::pull($config, 'cache');
+
+        $config = Arr::only($config, ['visibility', 'disable_asserts', 'url']);
+
+        if ($cache) {
+            $adapter = new CachedAdapter($adapter, $this->createCacheStore($cache));
+        }
+
+        return new Flysystem($adapter, count($config) > 0 ? $config : null);
+    }
+
+    /**
+     * Create a cache store instance.
+     *
+     * @param  mixed  $config
+     * @return \League\Flysystem\Cached\CacheInterface
+     *
+     * @throws \InvalidArgumentException
+     */
+    protected function createCacheStore($config)
+    {
+        if ($config === true) {
+            return new MemoryStore;
+        }
+
+        return new Cache(
+            $this->app['cache']->store($config['store']),
+            $config['prefix'] ?? 'flysystem',
+            $config['expire'] ?? null
         );
     }
 
     /**
-     * Get all of the files from the given directory (recursive).
+     * Adapt the filesystem implementation.
      *
-     * @param  string  $directory
-     * @param  bool  $hidden
-     * @return \Symfony\Component\Finder\SplFileInfo[]
+     * @param  \League\Flysystem\FilesystemInterface  $filesystem
+     * @return \Illuminate\Contracts\Filesystem\Filesystem
      */
-    public function allFiles($directory, $hidden = false)
+    protected function adapt(FilesystemInterface $filesystem)
     {
-        return iterator_to_array(
-            Finder::create()->files()->ignoreDotFiles(! $hidden)->in($directory)->sortByName(),
-            false
-        );
+        return new FilesystemAdapter($filesystem);
     }
 
     /**
-     * Get all of the directories within a given directory.
+     * Set the given disk instance.
      *
-     * @param  string  $directory
+     * @param  string  $name
+     * @param  mixed  $disk
+     * @return void
+     */
+    public function set($name, $disk)
+    {
+        $this->disks[$name] = $disk;
+    }
+
+    /**
+     * Get the filesystem connection configuration.
+     *
+     * @param  string  $name
      * @return array
      */
-    public function directories($directory)
+    protected function getConfig($name)
     {
-        $directories = [];
-
-        foreach (Finder::create()->in($directory)->directories()->depth(0)->sortByName() as $dir) {
-            $directories[] = $dir->getPathname();
-        }
-
-        return $directories;
+        return $this->app['config']["filesystems.disks.{$name}"];
     }
 
     /**
-     * Create a directory.
+     * Get the default driver name.
      *
-     * @param  string  $path
-     * @param  int     $mode
-     * @param  bool    $recursive
-     * @param  bool    $force
-     * @return bool
+     * @return string
      */
-    public function makeDirectory($path, $mode = 0755, $recursive = false, $force = false)
+    public function getDefaultDriver()
     {
-        if ($force) {
-            return @mkdir($path, $mode, $recursive);
-        }
-
-        return mkdir($path, $mode, $recursive);
+        return $this->app['config']['filesystems.default'];
     }
 
     /**
-     * Move a directory.
+     * Get the default cloud driver name.
      *
-     * @param  string  $from
-     * @param  string  $to
-     * @param  bool  $overwrite
-     * @return bool
+     * @return string
      */
-    public function moveDirectory($from, $to, $overwrite = false)
+    public function getDefaultCloudDriver()
     {
-        if ($overwrite && $this->isDirectory($to)) {
-            if (! $this->deleteDirectory($to)) {
-                return false;
-            }
-        }
-
-        return @rename($from, $to) === true;
+        return $this->app['config']['filesystems.cloud'];
     }
 
     /**
-     * Copy a directory from one location to another.
+     * Register a custom driver creator Closure.
      *
-     * @param  string  $directory
-     * @param  string  $destination
-     * @param  int     $options
-     * @return bool
+     * @param  string    $driver
+     * @param  \Closure  $callback
+     * @return $this
      */
-    public function copyDirectory($directory, $destination, $options = null)
+    public function extend($driver, Closure $callback)
     {
-        if (! $this->isDirectory($directory)) {
-            return false;
-        }
+        $this->customCreators[$driver] = $callback;
 
-        $options = $options ?: FilesystemIterator::SKIP_DOTS;
-
-        // If the destination directory does not actually exist, we will go ahead and
-        // create it recursively, which just gets the destination prepared to copy
-        // the files over. Once we make the directory we'll proceed the copying.
-        if (! $this->isDirectory($destination)) {
-            $this->makeDirectory($destination, 0777, true);
-        }
-
-        $items = new FilesystemIterator($directory, $options);
-
-        foreach ($items as $item) {
-            // As we spin through items, we will check to see if the current file is actually
-            // a directory or a file. When it is actually a directory we will need to call
-            // back into this function recursively to keep copying these nested folders.
-            $target = $destination.'/'.$item->getBasename();
-
-            if ($item->isDir()) {
-                $path = $item->getPathname();
-
-                if (! $this->copyDirectory($path, $target, $options)) {
-                    return false;
-                }
-            }
-
-            // If the current items is just a regular file, we will just copy this to the new
-            // location and keep looping. If for some reason the copy fails we'll bail out
-            // and return false, so the developer is aware that the copy process failed.
-            else {
-                if (! $this->copy($item->getPathname(), $target)) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
+        return $this;
     }
 
     /**
-     * Recursively delete a directory.
+     * Dynamically call the default driver instance.
      *
-     * The directory itself may be optionally preserved.
-     *
-     * @param  string  $directory
-     * @param  bool    $preserve
-     * @return bool
+     * @param  string  $method
+     * @param  array   $parameters
+     * @return mixed
      */
-    public function deleteDirectory($directory, $preserve = false)
+    public function __call($method, $parameters)
     {
-        if (! $this->isDirectory($directory)) {
-            return false;
-        }
-
-        $items = new FilesystemIterator($directory);
-
-        foreach ($items as $item) {
-            // If the item is a directory, we can just recurse into the function and
-            // delete that sub-directory otherwise we'll just delete the file and
-            // keep iterating through each file until the directory is cleaned.
-            if ($item->isDir() && ! $item->isLink()) {
-                $this->deleteDirectory($item->getPathname());
-            }
-
-            // If the item is just a file, we can go ahead and delete it since we're
-            // just looping through and waxing all of the files in this directory
-            // and calling directories recursively, so we delete the real path.
-            else {
-                $this->delete($item->getPathname());
-            }
-        }
-
-        if (! $preserve) {
-            @rmdir($directory);
-        }
-
-        return true;
-    }
-
-    /**
-     * Empty the specified directory of all files and folders.
-     *
-     * @param  string  $directory
-     * @return bool
-     */
-    public function cleanDirectory($directory)
-    {
-        return $this->deleteDirectory($directory, true);
+        return $this->disk()->$method(...$parameters);
     }
 }
