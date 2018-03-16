@@ -10,7 +10,7 @@ use Illuminate\Contracts\Queue\Monitor as MonitorContract;
 /**
  * @mixin \Illuminate\Contracts\Queue\Queue
  */
-class QueueManager implements FactoryContract, MonitorContract
+class QueueManager extends SupportManager implements FactoryContract, MonitorContract
 {
     /**
      * The application instance.
